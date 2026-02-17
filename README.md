@@ -1,6 +1,6 @@
 # Audio Time-Stretching & Pitch-Shifting Toolkit
 
-Two desktop applications for Windows 11 that manipulate audio using different mathematical approaches to time-frequency analysis. Both offer real-time visualisation, microphone recording, and WAV export through identical UI layouts — making them ideal for comparing how STFT and CWT handle the same audio material.
+Two desktop applications for Windows 11 that manipulate audio using different mathematical approaches to time-frequency analysis. Both offer visualisation, microphone recording, and WAV export through identical UI layouts — making them ideal for comparing how STFT and CWT handle the same audio material.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D6)
