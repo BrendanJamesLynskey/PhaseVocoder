@@ -58,7 +58,7 @@ Both applications share an identical control layout:
 ### Setup
 
 ```bash
-git clone https://github.com/yourusername/audio-stretch-pitch.git
+git clone https://github.com/BrendanJamesLynskey/PhaseVocoder.git
 cd audio-stretch-pitch
 pip install -r requirements.txt
 ```
