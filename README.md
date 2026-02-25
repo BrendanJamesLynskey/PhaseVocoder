@@ -1,6 +1,6 @@
 # Audio Time-Stretching & Pitch-Shifting Utilities
 
-Two desktop applications for Windows 11 that manipulate audio using different mathematical approaches to time-frequency analysis. Both offer visualisation, microphone recording, and WAV export through identical UI layouts — making them ideal for comparing how STFT and CWT handle the same audio material.
+Three desktop applications for Windows 11 that manipulate audio using different mathematical approaches to time-frequency analysis. All three offer visualisation, microphone recording, and WAV export through identical UI layouts — making them ideal for comparing how STFT, CWT, and CQT handle the same audio material.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D6)
@@ -32,11 +32,23 @@ Uses the **Continuous Wavelet Transform (CWT)** with Morlet wavelets. Instead of
 - Better transient preservation on percussive material
 - Approximate reconstruction compensated by least-squares scaling
 
+### CQT Processor (`cqt_processor.py`)
+
+Uses the **Constant-Q Transform (CQT)** — a discrete, logarithmically-spaced frequency analysis that sits between the STFT and CWT. Each bin has a constant quality factor (centre frequency divided by bandwidth), giving musically meaningful resolution: semitone-spaced bins by default, with adaptive time resolution that shortens at high frequencies.
+
+**Time-stretching** uses heterodyne phase unwrapping to extract true instantaneous frequencies from the CQ spectrogram, phase-locks adjacent bins to prevent spectral-leakage artefacts, and resynthesises via sample-level additive synthesis. **Pitch-shifting** uses the same stretch-plus-resample approach as the other two.
+
+- Configurable bins per octave (12–48) and frequency range
+- Logarithmic frequency grid aligned to musical intervals
+- Heterodyne phase unwrapping handles large inter-frame phase advances
+- Phase locking eliminates tone-splitting from spectral leakage
+- Sample-level additive resynthesis avoids frame-based overlap-add artefacts
+
 ---
 
 ## Features
 
-Both applications share an identical control layout:
+All three applications share an identical control layout:
 
 - **Load WAV** or **record from microphone** (up to 30 seconds)
 - **Time-stretch** from 0.25× to 4.0×
@@ -80,6 +92,7 @@ If `sounddevice` fails to install, you may need the [Visual C++ Redistributable]
 ```bash
 python phase_vocoder.py
 python wavelet_processor.py
+python cqt_processor.py
 ```
 
 ---
@@ -111,9 +124,24 @@ Input → CWT (Morlet) → [Scalogram] → Interpolate magnitudes
 2. For time-stretching, the magnitude envelope and instantaneous frequency at each scale are interpolated to the target length. Phase is resynthesised by cumulative integration of the interpolated instantaneous frequency — this is the key to preserving pitch.
 3. The inverse CWT reconstructs the wavelet-captured component, scaled by a least-squares factor. A separately resampled residual (energy the CWT doesn't capture) is added back for full-bandwidth output.
 
-### Pitch Shifting (Both)
+### CQT Processor — Constant-Q Approach
 
-Both applications use the same two-step strategy:
+```
+Input → CQT (per-bin convolution) → [CQ Spectrogram]
+    → Heterodyne phase unwrapping → Phase locking
+    → Interpolate magnitudes + instantaneous frequency to sample grid
+    → Integrate phase → Additive synthesis + residual blending → Output
+```
+
+1. The input is convolved with per-bin windowed complex exponential kernels at 84 log-spaced frequencies (12 bins/octave, C1–C8 by default), downsampled at hop-size intervals.
+2. True instantaneous frequencies are recovered via heterodyne unwrapping: the expected carrier phase advance is subtracted, the residual is wrapped to [−π, π], and the carrier is added back. This handles the large inter-frame phase advances (often 10+ full cycles) that defeat standard unwrapping.
+3. Phase locking assigns every non-peak bin the instantaneous frequency of its nearest spectral peak, preventing leakage sidebands from creating phantom tones.
+4. For each output sample, magnitude and instantaneous frequency are interpolated from the frame grid, and phase is obtained by cumulative integration. The output is the sum of all bins' cosine oscillators modulated by their interpolated magnitudes.
+5. A resampled residual (energy not captured by the CQT) is blended back, and the output is RMS-matched to the input.
+
+### Pitch Shifting (All Three)
+
+All three applications use the same two-step strategy:
 
 1. **Time-stretch** by the pitch ratio (2^(semitones/12)) — this changes duration without changing pitch.
 2. **Resample** back to the target length — this shifts all frequencies by the desired ratio.
@@ -122,22 +150,25 @@ Both applications use the same two-step strategy:
 
 ## Comparison
 
-| | Phase Vocoder | Wavelet Processor |
-|---|---|---|
-| **Frequency resolution** | Linear (uniform FFT bins) | Logarithmic (perceptually spaced) |
-| **Time resolution** | Fixed by FFT window size | Adaptive (finer at high frequencies) |
-| **Reconstruction** | Near-perfect (overlap-add) | Approximate (residual-compensated) |
-| **Transient handling** | Can smear attacks | Better preservation |
-| **Computational cost** | Lower | Higher |
-| **Typical artefacts** | Metallic / phasey at extreme settings | Smoother but less precise |
-| **Best for** | Tonal material, moderate stretches | Percussive material, speech |
+| | Phase Vocoder (STFT) | Wavelet Processor (CWT) | CQT Processor |
+|---|---|---|---|
+| **Frequency resolution** | Linear (uniform FFT bins) | Logarithmic (continuous scales) | Logarithmic (discrete bins) |
+| **Time resolution** | Fixed by FFT window size | Adaptive (finer at high frequencies) | Adaptive (shorter kernels at high frequencies) |
+| **Frequency grid** | Fixed by FFT size (e.g. 1025 bins) | User-defined continuous scales (e.g. 64 voices) | User-defined discrete bins (e.g. 12 per octave) |
+| **Resynthesis** | Overlap-add (inverse FFT) | Weighted sum over scales (inverse CWT) | Sample-level additive synthesis |
+| **Reconstruction** | Near-perfect (COLA overlap-add) | Approximate (residual-compensated) | Approximate (residual + RMS matched) |
+| **Phase handling** | Standard bin-relative unwrapping | Standard per-sample unwrapping | Heterodyne unwrapping + phase locking |
+| **Transient handling** | Can smear attacks | Better preservation | Intermediate (adaptive kernels, hop-limited) |
+| **Computational cost** | Lowest | Highest | Medium |
+| **Typical artefacts** | Metallic / phasey at extreme settings | Smoother but less precise | Clean on tonal; residual colouration on broadband |
+| **Best for** | Tonal material, moderate stretches | Percussive material, speech | Musical material, log-frequency analysis |
 
 ---
 
 ## Troubleshooting
 
 ### No sound on playback
-Both apps use callback-based `sounddevice.OutputStream` for Windows reliability. If you still get no audio, check that your default output device supports 44100 Hz in Windows Sound Settings.
+All three apps use callback-based `sounddevice.OutputStream` for Windows reliability. If you still get no audio, check that your default output device supports 44100 Hz in Windows Sound Settings.
 
 ### `pip install sounddevice` fails
 Install the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) and retry.
@@ -145,19 +176,21 @@ Install the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.
 ### `python` not recognised
 Try `py` instead, or use the full path: `C:\Users\<you>\AppData\Local\Programs\Python\Python3xx\python.exe`.
 
-### Processing is slow (wavelet)
-The CWT is more computationally expensive than the STFT. For faster results, reduce the number of voices (24 or 36) or narrow the frequency range.
+### Processing is slow (wavelet / CQT)
+The CWT is the most computationally expensive of the three approaches; the CQT is intermediate. For faster results, reduce the number of voices/bins per octave or narrow the frequency range.
 
 ---
 
 ## Project Structure
 
 ```
-├── phase_vocoder.py          # STFT-based application
-├── wavelet_processor.py      # CWT-based application
-├── requirements.txt          # Python dependencies
-├── phase_vocoder_report.docx # Technical report (phase vocoder)
-├── wavelet_report.docx       # Technical report (wavelet processor)
+├── phase_vocoder.py              # STFT-based application
+├── wavelet_processor.py          # CWT-based application
+├── cqt_processor.py              # CQT-based application
+├── requirements.txt              # Python dependencies
+├── phase_vocoder_report.docx     # Technical report (phase vocoder)
+├── wavelet_report.docx           # Technical report (wavelet processor)
+├── cqt_processor_report.docx     # Technical report (CQT processor)
 └── README.md
 ```
 
@@ -169,6 +202,7 @@ Detailed technical reports are included as Word documents with equation-editor f
 
 - **phase_vocoder_report.docx** — STFT analysis/synthesis, phase accumulation algorithm, overlap-add reconstruction
 - **wavelet_report.docx** — Morlet wavelet, CWT/iCWT, instantaneous frequency phase synthesis, residual preservation
+- **cqt_processor_report.docx** — CQT analysis kernels, heterodyne phase unwrapping, phase locking, sample-level additive resynthesis
 
 ---
 

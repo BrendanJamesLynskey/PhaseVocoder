@@ -218,6 +218,103 @@ def icqt(CQ: np.ndarray, sr: int, hop: int, freqs: np.ndarray,
 #  Time Stretch & Pitch Shift via CQT
 # ──────────────────────────────────────────────
 
+def _compute_inst_freq(CQ: np.ndarray, freqs: np.ndarray,
+                       hop: int, sr: int) -> np.ndarray:
+    """
+    Compute true instantaneous frequency for each CQT bin using
+    heterodyne (carrier-relative) phase unwrapping.
+
+    Standard ``np.unwrap`` fails on CQT coefficients because the phase
+    advances by ``2π · f_k · hop / sr`` radians per frame — often many
+    full cycles — so the wrapped frame-to-frame difference looks like a
+    small step and ``unwrap`` leaves it alone.
+
+    Fix: subtract the expected carrier advance, wrap the residual to
+    [−π, π], then add the carrier back.  This recovers the true
+    instantaneous frequency even when the per-frame advance exceeds 2π.
+
+    Returns
+    -------
+    inst_freq : array, shape (n_bins, n_frames)
+        Instantaneous frequency in **radians per sample**.
+    """
+    n_bins, n_frames = CQ.shape
+    inst_freq = np.zeros((n_bins, n_frames))
+
+    for k in range(n_bins):
+        raw_phase = np.angle(CQ[k, :])
+        carrier_advance = 2.0 * np.pi * freqs[k] * hop / sr
+
+        dphi = np.diff(raw_phase)
+        residual = dphi - carrier_advance
+        residual_wrapped = (residual + np.pi) % (2.0 * np.pi) - np.pi
+
+        true_advance = carrier_advance + residual_wrapped   # rad / frame
+        true_if = true_advance / hop                        # rad / sample
+
+        inst_freq[k, 0] = (true_if[0] if len(true_if) > 0
+                           else 2.0 * np.pi * freqs[k] / sr)
+        inst_freq[k, 1:] = true_if
+
+    return inst_freq
+
+
+def _phase_lock_inst_freq(inst_freq: np.ndarray,
+                          mag: np.ndarray) -> np.ndarray:
+    """
+    Phase-lock adjacent CQT bins to the nearest spectral peak.
+
+    The CQT's finite frequency resolution spreads a pure tone across
+    several bins.  Without correction, each bin synthesises a sinusoid
+    at its *own* slightly different frequency, producing audible beating
+    / tone-splitting artefacts.
+
+    For every frame, local magnitude peaks are found across bins, and
+    every non-peak bin adopts the instantaneous frequency of the nearest
+    peak.  This forces leakage sidebands to cohere with the true partial.
+    """
+    n_bins, n_frames = inst_freq.shape
+    locked = inst_freq.copy()
+
+    for n in range(n_frames):
+        col = mag[:, n]
+        peaks = []
+        for k in range(1, n_bins - 1):
+            if col[k] > col[k - 1] and col[k] > col[k + 1]:
+                peaks.append(k)
+        if n_bins > 1:
+            if col[0] > col[1]:
+                peaks.append(0)
+            if col[-1] > col[-2]:
+                peaks.append(n_bins - 1)
+        if not peaks:
+            continue
+        peaks_arr = np.array(sorted(peaks))
+        for k in range(n_bins):
+            nearest = peaks_arr[np.argmin(np.abs(peaks_arr - k))]
+            locked[k, n] = inst_freq[nearest, n]
+
+    return locked
+
+
+def _synth_from_cqt(CQ, inst_freq, frame_times, target_times, n_out):
+    """
+    Additive synthesis: for each bin, interpolate magnitude and
+    instantaneous frequency to the output sample grid and integrate
+    phase sample-by-sample.
+    """
+    n_bins = CQ.shape[0]
+    mag = np.abs(CQ)
+    y = np.zeros(n_out)
+    for k in range(n_bins):
+        mag_out = np.interp(target_times, frame_times, mag[k, :])
+        if_out  = np.interp(target_times, frame_times, inst_freq[k, :])
+        phase   = np.cumsum(if_out)
+        phase   = phase - phase[0] + np.angle(CQ[k, 0])
+        y += mag_out * np.cos(phase)
+    return y
+
+
 def cqt_time_stretch(x: np.ndarray, stretch: float, sr: int,
                      hop: int = 512, fmin: float = 32.7,
                      n_bins: int = 84, bins_per_octave: int = 12,
@@ -225,15 +322,23 @@ def cqt_time_stretch(x: np.ndarray, stretch: float, sr: int,
     """
     Time-stretch a mono signal by *stretch* using the CQT.
 
-    Algorithm:
-    1.  Compute the CQT of the input — a complex CQ spectrogram.
-    2.  For each frequency bin, extract magnitude and unwrapped phase,
-        derive the instantaneous frequency, interpolate both to the
-        target length, and resynthesise phase by integrating the
-        interpolated instantaneous frequency.
-    3.  Reconstruct via inverse CQT at the new time grid.
-    4.  Preserve the residual (energy not captured by the CQT) by
-        simple resampling and blending.
+    Algorithm
+    ---------
+    1. Compute the forward CQT.
+    2. Derive true instantaneous frequency per bin via heterodyne
+       (carrier-relative) phase unwrapping — essential because the
+       raw inter-frame phase advance can exceed many full cycles.
+    3. Phase-lock adjacent bins: spectral-leakage sidebands adopt the
+       frequency of the nearest magnitude peak so they reinforce rather
+       than beat against the true partial.
+    4. For each output sample, map back to the corresponding input time,
+       interpolate magnitude and instantaneous frequency, and integrate
+       to obtain phase.  This sample-level additive resynthesis avoids
+       the artefacts of the frame-based iCQT overlap-add.
+    5. A least-squares scale factor matches the output level.  The
+       residual (energy not captured by the CQT) is always resampled
+       and blended back to maintain full-bandwidth fidelity.
+    6. The output is RMS-matched to the input to ensure consistent level.
 
     stretch > 1 → slower / longer
     stretch < 1 → faster / shorter
@@ -241,51 +346,48 @@ def cqt_time_stretch(x: np.ndarray, stretch: float, sr: int,
     if abs(stretch - 1.0) < 1e-6:
         return x.copy()
 
-    # Forward CQT
-    CQ, freqs, Q_val = cqt(x, sr, hop, fmin, n_bins, bins_per_octave, q_factor)
+    # ---- analysis ----
+    CQ, freqs, Q_val = cqt(x, sr, hop, fmin, n_bins, bins_per_octave,
+                            q_factor)
     n_cq_bins, n_frames = CQ.shape
 
-    # Reconstruct to find what the CQT captures, then compute residual
-    x_recon = icqt(CQ, sr, hop, freqs, Q_val, len(x), bins_per_octave, q_factor)
-    # Least-squares scale factor for best fit
-    scale_fac = np.dot(x, x_recon) / (np.dot(x_recon, x_recon) + 1e-10)
-    residual = x - x_recon * scale_fac
+    inst_freq = _compute_inst_freq(CQ, freqs, hop, sr)
+    inst_freq = _phase_lock_inst_freq(inst_freq, np.abs(CQ))
 
-    # Target number of output frames
-    n_out = max(1, int(round(n_frames * stretch)))
+    # ---- time grids ----
+    frame_times = np.arange(n_frames, dtype=np.float64) * hop
+    n_in  = len(x)
+    n_out = max(1, int(round(n_in * stretch)))
 
-    t_in = np.arange(n_frames, dtype=np.float64)
-    t_out = np.linspace(0, n_frames - 1, n_out)
+    # Output samples mapped back to input time for interpolation
+    in_times = np.arange(n_out, dtype=np.float64) / stretch
 
-    CQ_stretched = np.zeros((n_cq_bins, n_out), dtype=np.complex128)
+    # ---- synthesis (stretched) ----
+    y = _synth_from_cqt(CQ, inst_freq, frame_times, in_times, n_out)
 
-    for k in range(n_cq_bins):
-        mag = np.abs(CQ[k, :])
-        phase = np.unwrap(np.angle(CQ[k, :]))
+    # ---- scale factor via unstretched resynthesis ----
+    orig_times = np.arange(n_in, dtype=np.float64)
+    y_orig = _synth_from_cqt(CQ, inst_freq, frame_times, orig_times, n_in)
 
-        # Instantaneous frequency (radians per frame)
-        inst_freq = np.gradient(phase)
+    scale_fac = np.dot(x, y_orig) / (np.dot(y_orig, y_orig) + 1e-10)
+    y      *= scale_fac
+    y_orig *= scale_fac
 
-        # Interpolate magnitude and instantaneous frequency to output grid
-        mag_out = np.interp(t_out, t_in, mag)
-        if_out = np.interp(t_out, t_in, inst_freq)
+    # ---- residual blending ----
+    # Always include the residual: for tonal signals it is small and
+    # preserves high-frequency detail; for broadband or transient
+    # material the residual carries most of the energy and dropping it
+    # would silence the output.
+    residual = x - y_orig
+    y += resample(residual, n_out)
 
-        # Resynthesise phase by cumulative integration of inst. freq.
-        phase_out = np.cumsum(if_out)
-        phase_out = phase_out - phase_out[0] + phase[0]  # align initial phase
+    # ---- RMS-match output to input ----
+    rms_in  = np.sqrt(np.mean(x ** 2))
+    rms_out = np.sqrt(np.mean(y ** 2))
+    if rms_out > 1e-10:
+        y *= rms_in / rms_out
 
-        CQ_stretched[k, :] = mag_out * np.exp(1j * phase_out)
-
-    # Reconstruct from stretched CQ coefficients
-    out_len = max(1, int(round(len(x) * stretch)))
-    hop_out = max(1, int(round(hop * stretch)))
-    y_cqt = icqt(CQ_stretched, sr, hop_out, freqs, Q_val, out_len,
-                 bins_per_octave, q_factor) * scale_fac
-
-    # Stretch residual by simple resampling
-    residual_stretched = resample(residual, out_len)
-
-    return y_cqt + residual_stretched
+    return y
 
 
 def cqt_pitch_shift(x: np.ndarray, semitones: float, sr: int,
