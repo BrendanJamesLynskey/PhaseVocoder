@@ -189,8 +189,11 @@ The CWT is the most computationally expensive of the three approaches; the CQT i
 ├── cqt_processor.py              # CQT-based application
 ├── requirements.txt              # Python dependencies
 ├── phase_vocoder_report.docx     # Technical report (phase vocoder)
+├── phase_vocoder_report.md       # Technical report (phase vocoder) — Markdown
 ├── wavelet_report.docx           # Technical report (wavelet processor)
+├── wavelet_report.md             # Technical report (wavelet processor) — Markdown
 ├── cqt_processor_report.docx     # Technical report (CQT processor)
+├── cqt_processor_report.md       # Technical report (CQT processor) — Markdown
 └── README.md
 ```
 
