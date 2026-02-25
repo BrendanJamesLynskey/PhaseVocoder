@@ -218,6 +218,73 @@ def icqt(CQ: np.ndarray, sr: int, hop: int, freqs: np.ndarray,
 #  Time Stretch & Pitch Shift via CQT
 # ──────────────────────────────────────────────
 
+def _stft_stretch(x: np.ndarray, stretch: float,
+                  fft_size: int = 2048, hop_a: int = 512) -> np.ndarray:
+    """
+    Lightweight STFT phase-vocoder time-stretch.
+
+    Used to stretch the residual signal (energy the CQT does not
+    capture).  Unlike ``scipy.signal.resample`` — which changes pitch —
+    the phase vocoder preserves pitch while changing duration, preventing
+    audible phantom tones from appearing in the output.
+    """
+    if abs(stretch - 1.0) < 1e-6:
+        return x.copy()
+
+    N = fft_size
+    Ha = hop_a
+    win = get_window("hann", N, fftbins=False)
+
+    n_frames = 1 + (len(x) - N) // Ha
+    if n_frames < 2:
+        target = max(1, int(round(len(x) * stretch)))
+        return resample(x, target)
+
+    xp = np.pad(x, (0, max(0, (n_frames - 1) * Ha + N - len(x))))
+
+    # Forward STFT
+    stft = np.zeros((N // 2 + 1, n_frames), dtype=np.complex128)
+    for m in range(n_frames):
+        stft[:, m] = np.fft.rfft(xp[m * Ha : m * Ha + N] * win)
+
+    # Phase-vocoder synthesis
+    Hs = Ha
+    n_out_frames = max(1, int(round(n_frames * stretch)))
+    omega = 2.0 * np.pi * np.arange(N // 2 + 1) * Ha / N
+
+    out_len = (n_out_frames - 1) * Hs + N
+    y = np.zeros(out_len)
+    win_sum = np.zeros(out_len)
+    phase_acc = np.angle(stft[:, 0])
+
+    for m_out in range(n_out_frames):
+        pos = m_out / stretch
+        m0 = min(int(pos), n_frames - 1)
+        m1 = min(m0 + 1, n_frames - 1)
+        frac = pos - int(pos)
+
+        mag = (1.0 - frac) * np.abs(stft[:, m0]) + frac * np.abs(stft[:, m1])
+
+        if m_out > 0:
+            dphi = np.angle(stft[:, m1]) - np.angle(stft[:, m0])
+            dev = dphi - omega
+            dev -= 2.0 * np.pi * np.round(dev / (2.0 * np.pi))
+            phase_acc += omega + dev
+
+        frame = np.fft.irfft(mag * np.exp(1j * phase_acc), N) * win
+        start = m_out * Hs
+        y[start : start + N] += frame
+        win_sum[start : start + N] += win ** 2
+
+    nz = win_sum > 1e-8
+    y[nz] /= win_sum[nz]
+
+    target_len = max(1, int(round(len(x) * stretch)))
+    if len(y) >= target_len:
+        return y[:target_len]
+    return np.pad(y, (0, target_len - len(y)))
+
+
 def _compute_inst_freq(CQ: np.ndarray, freqs: np.ndarray,
                        hop: int, sr: int) -> np.ndarray:
     """
@@ -374,12 +441,12 @@ def cqt_time_stretch(x: np.ndarray, stretch: float, sr: int,
     y_orig *= scale_fac
 
     # ---- residual blending ----
-    # Always include the residual: for tonal signals it is small and
-    # preserves high-frequency detail; for broadband or transient
-    # material the residual carries most of the energy and dropping it
-    # would silence the output.
+    # The residual often contains tonal energy that the CQT missed.
+    # Naive resampling would shift the residual's pitch by 1/stretch,
+    # creating audible phantom tones.  Instead, time-stretch the residual
+    # with a lightweight STFT phase vocoder to preserve its pitch.
     residual = x - y_orig
-    y += resample(residual, n_out)
+    y += _stft_stretch(residual, stretch)
 
     # ---- RMS-match output to input ----
     rms_in  = np.sqrt(np.mean(x ** 2))

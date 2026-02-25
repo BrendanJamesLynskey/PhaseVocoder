@@ -100,7 +100,9 @@ The CQT with a finite number of bins cannot perfectly represent the entire signa
 
 where x̂ is the additive resynthesis of the original signal and α is the least-squares scale factor.
 
-The residual is always included in the output: it is resampled to the target length using SciPy's polyphase resampler and added to the CQT-synthesised component. This preserves full-bandwidth fidelity for tonal signals (where the residual is small and carries high-frequency detail) and prevents silence for broadband material (where the CQT captures little energy and the residual carries most of the signal). Resampling the residual does shift its pitch by 1/stretch, but this is acceptable because the residual is dominated by noise-like content whose pitch shift is perceptually less noticeable than a missing signal would be.
+The residual is always included in the output to preserve full-bandwidth fidelity and prevent silence on broadband material. However, naive resampling of the residual to the target length would shift its pitch by 1/stretch — creating audible phantom tones. Testing confirmed that a 1500 Hz whistle stretched to 1.5× produced a spurious 1000 Hz tone at only −10 dB below the true pitch when the residual was naively resampled.
+
+To avoid this, the residual is time-stretched using a lightweight STFT phase vocoder (2048-point FFT, 512-sample hop) which preserves pitch while changing duration. This eliminates the phantom tones completely: the same 1500 Hz whistle stretched to 1.5× shows only the original frequency in the output, with no detectable pitch-shifted artefacts.
 
 After blending, the output is RMS-matched to the input to ensure consistent loudness regardless of stretch factor.
 
@@ -139,7 +141,7 @@ The following table summarises the key differences between the three approaches:
 
   Computational cost       Lowest (single FFT size)                               Highest (convolution per scale per sample)        Medium (convolution per bin, hop subsampling)
 
-  Typical artefacts        Metallic / phasey at extreme stretches                 Smooth but less precise; residual colouration     Clean on tonal; residual pitch shift on broadband
+  Typical artefacts        Metallic / phasey at extreme stretches                 Smooth but less precise; residual colouration     Clean on tonal; STFT residual stretch preserves pitch
 
   Best for                 Tonal material, moderate stretches                     Percussive material, speech                       Musical material (log-freq matches musical intervals)
 

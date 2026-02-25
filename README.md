@@ -160,7 +160,7 @@ All three applications use the same two-step strategy:
 | **Phase handling** | Standard bin-relative unwrapping | Standard per-sample unwrapping | Heterodyne unwrapping + phase locking |
 | **Transient handling** | Can smear attacks | Better preservation | Intermediate (adaptive kernels, hop-limited) |
 | **Computational cost** | Lowest | Highest | Medium |
-| **Typical artefacts** | Metallic / phasey at extreme settings | Smoother but less precise | Clean on tonal; residual colouration on broadband |
+| **Typical artefacts** | Metallic / phasey at extreme settings | Smoother but less precise | Clean on tonal; STFT residual stretch preserves pitch |
 | **Best for** | Tonal material, moderate stretches | Percussive material, speech | Musical material, log-frequency analysis |
 
 ---
