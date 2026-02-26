@@ -76,9 +76,21 @@ The CWT with a finite set of scales cannot perfectly represent the entire signal
 
 6.  The residual r = x − α·x̂ is computed. This contains energy the CWT cannot represent.
 
-7.  After the CWT coefficients are stretched and reconstructed (scaled by α), the residual is time-stretched by simple resampling and added back.
+7.  After the CWT coefficients are stretched and reconstructed (scaled by α), the residual is time-stretched using a stochastic synthesis method and added back.
 
-Without this strategy, the spectral centroid of the output drops dramatically. Testing with broadband noise showed the centroid falling from 11,033 Hz to 4,269 Hz (a ratio of 0.39). With residual preservation and the full 20--20,000 Hz analysis range, the centroid ratio improves to 0.96, which is perceptually transparent.
+The residual is predominantly noise-like (transients, breath, consonants, unpitched texture). A naive approach of interpolating the residual waveform sample-by-sample fails because it merely thins out the noise rather than properly stretching it — the noise events land at approximately correct positions but the texture between them is sparse and low-pass filtered. Similarly, frequency-domain resampling (e.g. `scipy.signal.resample`) compresses the spectrum, shifting the residual's pitch down by the inverse of the stretch factor.
+
+The stochastic residual method, inspired by the Spectral Modeling Synthesis (SMS) framework, avoids both problems:
+
+1. The residual is analysed with a short STFT to capture per-frame magnitude spectra, and a per-frame RMS amplitude envelope is extracted.
+
+2. Both the magnitude spectra and the envelope are interpolated to the target stretched length.
+
+3. Fresh noise is synthesised at each output frame by applying random phases to the interpolated magnitude spectra, then overlap-added.
+
+4. The synthesised noise is modulated by the interpolated envelope so that transient positions move correctly in time.
+
+This regenerates the noise at full density at every output sample with the correct spectral colour and amplitude contour. Without this strategy, the spectral centroid of the output drops dramatically. Testing with broadband noise showed the centroid falling from 11,033 Hz to 4,269 Hz (a ratio of 0.39). With residual preservation and the full 20--20,000 Hz analysis range, the centroid ratio improves to 0.96, which is perceptually transparent.
 
 ## 4. Pitch Shifting
 
