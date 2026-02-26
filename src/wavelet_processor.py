@@ -569,27 +569,27 @@ class WaveletProcessorApp:
         fmax_d = min(sr / 2 * 0.95, 16000.0)
         omega0_disp = 12.0
 
-        # Downsample to a manageable size for CWT analysis.
-        # Target ~8000 samples — enough resolution for the display but
-        # keeps CWT computation and rendering fast and light on memory.
-        max_samples = 8000
-        if len(data) > max_samples:
-            display_data = resample(data, max_samples)
-            display_sr = sr * max_samples / len(data)
-        else:
-            display_data = data
-            display_sr = sr
+        # Target ~800 time columns for the display.  We compute each
+        # voice's convolution at full sample rate (so frequencies up to
+        # Nyquist are correct) then immediately stride to keep memory low.
+        n_cols = min(800, len(data))
+        hop = max(1, len(data) // n_cols)
 
-        scales = make_scales(display_sr, n_disp, fmin_d, fmax_d, omega0_disp)
-        freqs = scale_to_freq(scales, display_sr, omega0_disp)
-        W = cwt_morlet(display_data, scales, omega0_disp)
+        scales = make_scales(sr, n_disp, fmin_d, fmax_d, omega0_disp)
+        freqs = scale_to_freq(scales, sr, omega0_disp)
 
-        S_db = 20 * np.log10(np.abs(W) + 1e-10)
+        S = np.zeros((n_disp, n_cols), dtype=np.float64)
+        for i, s in enumerate(scales):
+            half = int(4.0 * s)
+            wlen = 2 * half + 1
+            psi = morlet_wavelet(wlen, s, omega0_disp)
+            row = fftconvolve(data, psi[::-1].conj(), mode="same")
+            S[i, :] = np.abs(row[::hop][:n_cols])
+
+        S_db = 20 * np.log10(S + 1e-10)
         vmax = S_db.max()
         vmin = max(vmax - 80, S_db.min())
 
-        # Use imshow for lightweight rendering; map the y-axis ticks to
-        # the true log-spaced frequencies ourselves.
         duration = len(data) / sr
         extent = [0, duration, 0, n_disp]
         ax.imshow(S_db, aspect="auto", origin="lower", extent=extent,
