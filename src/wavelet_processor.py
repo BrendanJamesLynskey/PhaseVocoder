@@ -560,36 +560,37 @@ class WaveletProcessorApp:
         ax.set_facecolor(self._surface)
         ax.set_title(title, color=self._fg, fontsize=11, fontweight="bold")
 
-        n_disp = 48
+        # Display CWT uses more voices and a higher omega0 than the
+        # processing CWT.  Higher omega0 (narrower wavelets) gives sharper
+        # frequency resolution so individual harmonics are clearly visible;
+        # more voices provide a denser frequency grid.
+        n_disp = 128
         fmin_d = 50.0
         fmax_d = min(sr / 2 * 0.95, 16000.0)
-        omega0 = 6.0
-        scales = make_scales(sr, n_disp, fmin_d, fmax_d, omega0)
-        freqs = scale_to_freq(scales, sr, omega0)
+        omega0_disp = 12.0
 
         max_display = sr * 10
         if len(data) > max_display:
             ratio = max_display / len(data)
             display_data = resample(data, max_display)
             display_sr = int(sr * ratio)
-            scales_d = make_scales(display_sr, n_disp, fmin_d, fmax_d, omega0)
-            W = cwt_morlet(display_data, scales_d, omega0)
         else:
-            W = cwt_morlet(data, scales, omega0)
+            display_data = data
+            display_sr = sr
+
+        scales = make_scales(display_sr, n_disp, fmin_d, fmax_d, omega0_disp)
+        freqs = scale_to_freq(scales, display_sr, omega0_disp)
+        W = cwt_morlet(display_data, scales, omega0_disp)
 
         S_db = 20 * np.log10(np.abs(W) + 1e-10)
         vmax = S_db.max()
         vmin = max(vmax - 80, S_db.min())
 
-        extent = [0, len(data) / sr, 0, len(freqs)]
-        ax.imshow(S_db, aspect="auto", origin="lower", extent=extent,
-                  cmap="inferno", vmin=vmin, vmax=vmax, interpolation="bilinear")
-
-        n_ticks = 6
-        tick_pos = np.linspace(0, len(freqs), n_ticks)
-        tick_labels = [f"{int(f)}" for f in np.geomspace(fmin_d, fmax_d, n_ticks)]
-        ax.set_yticks(tick_pos)
-        ax.set_yticklabels(tick_labels)
+        t_axis = np.arange(W.shape[1]) / display_sr
+        ax.pcolormesh(t_axis, freqs, S_db, cmap="inferno",
+                      vmin=vmin, vmax=vmax, shading="gouraud")
+        ax.set_yscale("log")
+        ax.set_ylim(freqs.min(), freqs.max())
         ax.set_xlabel("Time (s)", color=self._muted, fontsize=9)
         ax.set_ylabel("Frequency (Hz)", color=self._muted, fontsize=9)
         ax.tick_params(colors=self._muted, labelsize=8)
