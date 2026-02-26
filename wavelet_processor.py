@@ -162,7 +162,15 @@ def wavelet_time_stretch(x, stretch, sr, n_voices=64, fmin=20.0, fmax=20000.0):
     # of content the CWT doesn't capture, mostly very high/low freqs)
     residual_stretched = resample(residual, n_out)
 
-    return y_cwt + residual_stretched
+    y = y_cwt + residual_stretched
+
+    # Match output RMS to input
+    rms_in = np.sqrt(np.mean(x ** 2))
+    rms_out = np.sqrt(np.mean(y ** 2))
+    if rms_out > 1e-10:
+        y *= rms_in / rms_out
+
+    return y
 
 
 def wavelet_pitch_shift(x, semitones, sr, n_voices=64, fmin=20.0, fmax=20000.0,

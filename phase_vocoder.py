@@ -96,7 +96,12 @@ def phase_vocoder_stretch(x: np.ndarray, stretch_factor: float,
 
     X = stft(x, fft_size, hop)
     n_bins, n_frames = X.shape
-    hop_out = int(round(hop * stretch_factor))
+
+    # If only one frame, can't interpolate — just replicate
+    if n_frames < 2:
+        target_len = int(round(len(x) * stretch_factor))
+        y = np.fft.irfft(X[:, 0], n=fft_size)[:len(x)]
+        return np.pad(y, (0, max(0, target_len - len(y))))[:target_len] if target_len > 0 else y
 
     # Expected phase advance per bin per hop
     omega = 2.0 * np.pi * np.arange(n_bins) * hop / fft_size
@@ -124,10 +129,19 @@ def phase_vocoder_stretch(x: np.ndarray, stretch_factor: float,
         dp = dp - 2.0 * np.pi * np.round(dp / (2.0 * np.pi))  # wrap
         inst_freq = omega + dp
 
-        phase_acc += inst_freq * stretch_factor
+        phase_acc += inst_freq
         Y[:, t] = mag * np.exp(1j * phase_acc)
 
-    return istft(Y, fft_size, hop_out)
+    # Synthesis hop = analysis hop; stretch comes from having more frames
+    y = istft(Y, fft_size, hop)
+
+    # Trim or pad to exact target length
+    target_len = int(round(len(x) * stretch_factor))
+    if len(y) > target_len:
+        y = y[:target_len]
+    elif len(y) < target_len:
+        y = np.pad(y, (0, target_len - len(y)))
+    return y
 
 
 def pitch_shift(x: np.ndarray, semitones: float, sr: int,
