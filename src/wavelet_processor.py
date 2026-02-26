@@ -75,13 +75,19 @@ def cwt_morlet(x, scales, omega0=6.0):
 
 
 def icwt_morlet(W, scales, omega0=6.0):
-    """Inverse CWT (approximate reconstruction from Morlet coefficients)."""
-    ds = np.gradient(scales)
-    real_sum = np.zeros(W.shape[1])
+    """Inverse CWT (approximate reconstruction from Morlet coefficients).
+
+    Uses the real part of the full complex sum (not real-part-only input)
+    so that both in-phase and quadrature information contribute to
+    reconstruction.  The ds/s^1.5 weighting follows from the CWT
+    admissibility integral for the Morlet wavelet.
+    """
+    d_log_s = np.gradient(np.log(scales))
+    complex_sum = np.zeros(W.shape[1], dtype=np.complex128)
     for i, s in enumerate(scales):
-        real_sum += np.real(W[i, :]) * ds[i] / (s ** 1.5)
+        complex_sum += W[i, :] * d_log_s[i] / np.sqrt(s)
     C_psi = 0.776  # empirical for omega0=6
-    return real_sum / C_psi
+    return np.real(complex_sum) / C_psi
 
 
 def make_scales(sr, n_voices=64, fmin=20.0, fmax=20000.0, omega0=6.0):
@@ -95,6 +101,157 @@ def make_scales(sr, n_voices=64, fmin=20.0, fmax=20000.0, omega0=6.0):
 def scale_to_freq(scales, sr, omega0=6.0):
     """Convert CWT scales to approximate centre frequencies (Hz)."""
     return sr * omega0 / (2.0 * np.pi * scales)
+
+
+# ----------------------------------------------
+#  Stochastic Residual Time-Stretch
+# ----------------------------------------------
+
+def _suppress_tonal_leakage(residual, nfft=2048, hop=512, threshold_db=6.0):
+    """Remove tonal peaks that leaked from the CWT into the residual.
+
+    Works frame-by-frame via STFT:
+      1. Compute magnitude spectrum for each frame
+      2. Estimate the local spectral floor (median-filtered magnitude)
+      3. Identify bins whose magnitude exceeds the floor by *threshold_db*
+      4. Attenuate those bins down to the floor level
+      5. Overlap-add the modified frames back
+
+    This ensures only noise-like content remains in the residual, preventing
+    tonal artefacts from being re-injected as unstretched sound during the
+    stochastic resynthesis.
+    """
+    n = len(residual)
+    if n < nfft:
+        return residual.copy()
+
+    window = np.hanning(nfft)
+    n_frames = max(1, (n - nfft) // hop + 1)
+    output = np.zeros(n)
+    win_sum = np.zeros(n)
+    threshold_lin = 10 ** (threshold_db / 20.0)
+
+    # Median filter half-width in bins (~200 Hz at 44100 / 2048)
+    med_half = max(4, nfft // 64)
+
+    for f in range(n_frames):
+        start = f * hop
+        seg = residual[start : start + nfft]
+        if len(seg) < nfft:
+            seg = np.pad(seg, (0, nfft - len(seg)))
+        spec = np.fft.rfft(seg * window)
+        mag = np.abs(spec)
+
+        # Estimate spectral floor via running median
+        padded = np.pad(mag, med_half, mode='reflect')
+        floor = np.array([
+            np.median(padded[i : i + 2 * med_half + 1])
+            for i in range(len(mag))
+        ])
+        floor = np.maximum(floor, 1e-10)
+
+        # Attenuate bins that stick above the floor (tonal peaks)
+        ratio = mag / floor
+        mask = np.ones_like(mag)
+        tonal = ratio > threshold_lin
+        # Bring tonal bins down to the floor level
+        mask[tonal] = floor[tonal] / (mag[tonal] + 1e-10)
+
+        spec_clean = spec * mask
+        frame = np.fft.irfft(spec_clean, n=nfft) * window
+        end = min(start + nfft, n)
+        seg_len = end - start
+        output[start:end] += frame[:seg_len]
+        win_sum[start:end] += window[:seg_len] ** 2
+
+    win_sum = np.maximum(win_sum, 1e-10)
+    output /= win_sum
+    return output
+
+
+def _stretch_residual_stochastic(residual, n_out, hop=256, nfft=1024):
+    """Time-stretch a noise-like residual signal to length *n_out*.
+
+    Uses an SMS-style stochastic approach:
+      1. STFT the residual to get per-frame magnitude spectra
+      2. Extract a per-frame amplitude envelope
+      3. Interpolate both to the target number of frames
+      4. Synthesise fresh noise shaped by the interpolated spectra
+      5. Modulate by the interpolated envelope
+
+    This correctly stretches the *temporal pattern* of noise (transient
+    positions, amplitude contour) while regenerating the noise itself
+    at full density, avoiding the thinning artefact of waveform interp.
+    """
+    n_in = len(residual)
+    if n_in == 0 or n_out == 0:
+        return np.zeros(n_out)
+
+    # Amplitude envelope (RMS in short frames)
+    env_hop = hop
+    n_env = max(1, n_in // env_hop)
+    envelope = np.array([
+        np.sqrt(np.mean(residual[i * env_hop : i * env_hop + nfft] ** 2) + 1e-20)
+        for i in range(n_env)
+    ])
+
+    # STFT for spectral shape
+    window = np.hanning(nfft)
+    n_frames = max(1, (n_in - nfft) // hop + 1)
+    mag_frames = np.zeros((n_frames, nfft // 2 + 1))
+    for f in range(n_frames):
+        start = f * hop
+        seg = residual[start : start + nfft]
+        if len(seg) < nfft:
+            seg = np.pad(seg, (0, nfft - len(seg)))
+        mag_frames[f] = np.abs(np.fft.rfft(seg * window))
+
+    # Target number of output frames (same hop size)
+    n_frames_out = max(1, (n_out - nfft) // hop + 1)
+    n_env_out = max(1, n_out // env_hop)
+
+    # Interpolate magnitude spectra to target frame count
+    t_in_frames = np.linspace(0, 1, n_frames)
+    t_out_frames = np.linspace(0, 1, n_frames_out)
+    mag_out = np.zeros((n_frames_out, nfft // 2 + 1))
+    for b in range(nfft // 2 + 1):
+        mag_out[:, b] = np.interp(t_out_frames, t_in_frames, mag_frames[:, b])
+
+    # Interpolate envelope to target length
+    t_in_env = np.linspace(0, 1, n_env)
+    t_out_env = np.linspace(0, 1, n_env_out)
+    env_out = np.interp(t_out_env, t_in_env, envelope)
+
+    # Synthesise: random-phase noise shaped by interpolated magnitudes
+    output = np.zeros(n_out)
+    win_sum = np.zeros(n_out)
+    synth_window = np.hanning(nfft)
+    for f in range(n_frames_out):
+        random_phase = np.exp(2j * np.pi * np.random.rand(nfft // 2 + 1))
+        spectrum = mag_out[f] * random_phase
+        frame = np.fft.irfft(spectrum, n=nfft) * synth_window
+        start = f * hop
+        end = min(start + nfft, n_out)
+        seg_len = end - start
+        output[start:end] += frame[:seg_len]
+        win_sum[start:end] += synth_window[:seg_len] ** 2
+
+    # Normalise overlap-add
+    win_sum = np.maximum(win_sum, 1e-10)
+    output /= win_sum
+
+    # Apply the stretched envelope
+    env_interp = np.interp(np.arange(n_out), np.linspace(0, n_out - 1, n_env_out), env_out)
+    # Current RMS in short blocks, then scale to match target envelope
+    local_hop = env_hop
+    for i in range(0, n_out, local_hop):
+        block = output[i : i + local_hop]
+        local_rms = np.sqrt(np.mean(block ** 2) + 1e-20)
+        target_rms = env_interp[min(i, n_out - 1)]
+        if local_rms > 1e-10:
+            output[i : i + local_hop] *= target_rms / local_rms
+
+    return output
 
 
 # ----------------------------------------------
@@ -158,15 +315,19 @@ def wavelet_time_stretch(x, stretch, sr, n_voices=64, fmin=20.0, fmax=20000.0):
 
     y_cwt = icwt_morlet(W_stretched, scales, omega0) * scale_factor
 
-    # Stretch residual by time-domain interpolation so that the waveform
-    # is spread over the new length without altering its spectral content.
-    # (scipy.signal.resample works in the frequency domain and would
-    #  compress the spectrum, shifting pitch down when stretch > 1.)
-    residual_stretched = np.interp(
-        np.linspace(0, len(residual) - 1, n_out),
-        np.arange(len(residual)),
-        residual,
-    )
+    # --- Stochastic residual time-stretch ---
+    # The residual is mostly noise-like (transients, breath, unpitched
+    # content).  Simple waveform interpolation doesn't properly stretch
+    # noise — it just thins it out.  Instead we use an SMS-style approach:
+    #   1. Suppress any tonal content that leaked through the CWT
+    #   2. Extract the residual's amplitude envelope
+    #   3. Capture its spectral shape (via a short STFT)
+    #   4. Stretch the envelope to the target length
+    #   5. Stretch the spectral shape frames to the target length
+    #   6. Generate fresh noise shaped by the interpolated spectrum
+    #   7. Modulate by the stretched envelope
+    residual_clean = _suppress_tonal_leakage(residual)
+    residual_stretched = _stretch_residual_stochastic(residual_clean, n_out)
 
     y = y_cwt + residual_stretched
 
