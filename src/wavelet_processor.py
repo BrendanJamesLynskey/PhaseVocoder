@@ -158,9 +158,15 @@ def wavelet_time_stretch(x, stretch, sr, n_voices=64, fmin=20.0, fmax=20000.0):
 
     y_cwt = icwt_morlet(W_stretched, scales, omega0) * scale_factor
 
-    # Stretch residual by simple resampling (preserves spectral character
-    # of content the CWT doesn't capture, mostly very high/low freqs)
-    residual_stretched = resample(residual, n_out)
+    # Stretch residual by time-domain interpolation so that the waveform
+    # is spread over the new length without altering its spectral content.
+    # (scipy.signal.resample works in the frequency domain and would
+    #  compress the spectrum, shifting pitch down when stretch > 1.)
+    residual_stretched = np.interp(
+        np.linspace(0, len(residual) - 1, n_out),
+        np.arange(len(residual)),
+        residual,
+    )
 
     y = y_cwt + residual_stretched
 
