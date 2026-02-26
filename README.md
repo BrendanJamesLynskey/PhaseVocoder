@@ -184,16 +184,21 @@ The CWT is the most computationally expensive of the three approaches; the CQT i
 ## Project Structure
 
 ```
-├── phase_vocoder.py              # STFT-based application
-├── wavelet_processor.py          # CWT-based application
-├── cqt_processor.py              # CQT-based application
-├── requirements.txt              # Python dependencies
-├── phase_vocoder_report.docx     # Technical report (phase vocoder)
-├── phase_vocoder_report.md       # Technical report (phase vocoder) — Markdown
-├── wavelet_report.docx           # Technical report (wavelet processor)
-├── wavelet_report.md             # Technical report (wavelet processor) — Markdown
-├── cqt_processor_report.docx     # Technical report (CQT processor)
-├── cqt_processor_report.md       # Technical report (CQT processor) — Markdown
+PhaseVocoder/
+├── src/
+│   ├── phase_vocoder.py          # STFT-based application
+│   ├── wavelet_processor.py      # CWT-based application
+│   └── cqt_processor.py          # CQT-based application
+├── tests/
+│   └── test_all.py               # Verification suite (90 tests across all 3 engines)
+├── docs/
+│   ├── phase_vocoder_report.docx # Technical report — STFT
+│   ├── phase_vocoder_report.md   # Technical report — STFT (Markdown)
+│   ├── wavelet_report.docx       # Technical report — CWT
+│   ├── wavelet_report.md         # Technical report — CWT (Markdown)
+│   ├── cqt_processor_report.docx # Technical report — CQT
+│   └── cqt_processor_report.md   # Technical report — CQT (Markdown)
+├── requirements.txt
 └── README.md
 ```
 
@@ -201,11 +206,21 @@ The CWT is the most computationally expensive of the three approaches; the CQT i
 
 ## Technical Reports
 
-Detailed technical reports are included as Word documents with equation-editor formatted mathematics:
+Detailed technical reports are included in `docs/` as both Word documents (with equation-editor formatted mathematics) and Markdown:
 
-- **phase_vocoder_report.docx** — STFT analysis/synthesis, phase accumulation algorithm, overlap-add reconstruction
-- **wavelet_report.docx** — Morlet wavelet, CWT/iCWT, instantaneous frequency phase synthesis, residual preservation
-- **cqt_processor_report.docx** — CQT analysis kernels, heterodyne phase unwrapping, phase locking, sample-level additive resynthesis
+- **phase_vocoder_report** — STFT analysis/synthesis, phase accumulation algorithm, overlap-add reconstruction
+- **wavelet_report** — Morlet wavelet, CWT/iCWT, instantaneous frequency phase synthesis, residual preservation
+- **cqt_processor_report** — CQT analysis kernels, heterodyne phase unwrapping, phase locking, sample-level additive resynthesis
+
+## Testing
+
+Run the full verification suite (90 tests across all three engines):
+
+```bash
+python tests/test_all.py
+```
+
+Tests cover duration accuracy, pitch preservation, pitch-shift accuracy, harmonic structure, phantom tone absence, level consistency, identity transforms, extreme stretch factors, octave round-trips, and short signal handling.
 
 ---
 
