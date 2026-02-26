@@ -569,11 +569,13 @@ class WaveletProcessorApp:
         fmax_d = min(sr / 2 * 0.95, 16000.0)
         omega0_disp = 12.0
 
-        max_display = sr * 10
-        if len(data) > max_display:
-            ratio = max_display / len(data)
-            display_data = resample(data, max_display)
-            display_sr = int(sr * ratio)
+        # Downsample to a manageable size for CWT analysis.
+        # Target ~8000 samples — enough resolution for the display but
+        # keeps CWT computation and rendering fast and light on memory.
+        max_samples = 8000
+        if len(data) > max_samples:
+            display_data = resample(data, max_samples)
+            display_sr = sr * max_samples / len(data)
         else:
             display_data = data
             display_sr = sr
@@ -586,11 +588,20 @@ class WaveletProcessorApp:
         vmax = S_db.max()
         vmin = max(vmax - 80, S_db.min())
 
-        t_axis = np.arange(W.shape[1]) / display_sr
-        ax.pcolormesh(t_axis, freqs, S_db, cmap="inferno",
-                      vmin=vmin, vmax=vmax, shading="gouraud")
-        ax.set_yscale("log")
-        ax.set_ylim(freqs.min(), freqs.max())
+        # Use imshow for lightweight rendering; map the y-axis ticks to
+        # the true log-spaced frequencies ourselves.
+        duration = len(data) / sr
+        extent = [0, duration, 0, n_disp]
+        ax.imshow(S_db, aspect="auto", origin="lower", extent=extent,
+                  cmap="inferno", vmin=vmin, vmax=vmax,
+                  interpolation="bilinear")
+
+        # Log-frequency tick labels
+        n_ticks = 8
+        tick_pos = np.linspace(0, n_disp, n_ticks)
+        tick_freqs = np.geomspace(freqs.min(), freqs.max(), n_ticks)
+        ax.set_yticks(tick_pos)
+        ax.set_yticklabels([f"{int(f)}" for f in tick_freqs])
         ax.set_xlabel("Time (s)", color=self._muted, fontsize=9)
         ax.set_ylabel("Frequency (Hz)", color=self._muted, fontsize=9)
         ax.tick_params(colors=self._muted, labelsize=8)
